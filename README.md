@@ -43,6 +43,56 @@ The default client uses same-origin `/api` requests, which works with the local 
 2. Set `CLIENT_ORIGIN` in `server/.env.local` to the client origin. Multiple allowed origins may be comma-separated.
 3. For genuinely cross-site HTTPS domains, set `COOKIE_SAME_SITE=none` and `NODE_ENV=production` on the server.
 
+## Deploying code changes
+
+### Frontend changes
+
+Commit and push changes to the `main` branch:
+
+```sh
+git add .
+git commit -m "Update website"
+git push origin main
+```
+
+Vercel automatically builds and publishes the frontend after the push.
+
+### Backend changes
+
+Backend changes must be built as a new Docker image and deployed to AWS. Make sure Docker Desktop is running, open a terminal in the project root, and run the following commands one at a time.
+
+Log Docker in to the project's AWS ECR registry:
+
+```sh
+aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 459800357986.dkr.ecr.ap-south-1.amazonaws.com
+```
+
+Build the Linux image and push it to ECR:
+
+```sh
+docker buildx build --platform linux/amd64 --tag 459800357986.dkr.ecr.ap-south-1.amazonaws.com/legacy-of-horus-server:latest --push ./server
+```
+
+Tell the ECS service to deploy the new image:
+
+```sh
+aws ecs update-service --cluster default --service legacy-of-horus-api --force-new-deployment --region ap-south-1
+```
+
+Allow approximately 2-5 minutes for the rolling deployment, then verify the production API:
+
+```sh
+curl https://legacy-of-horus.vercel.app/api/health
+```
+
+A healthy deployment returns:
+
+```json
+{"ok":true}
+```
+
+Do not commit `.env.local`, `node_modules`, or `dist`. MongoDB record changes do not require a deployment. AWS environment-variable or secret changes require the ECS service to be redeployed.
+
 ## Persistence and access
 
 - Donations, admin accounts, bank details, and campaign visibility are stored in MongoDB.
