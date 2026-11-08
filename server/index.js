@@ -18,19 +18,6 @@ const cookieSameSite = process.env.COOKIE_SAME_SITE?.toLowerCase() === 'none' ? 
 const secureCookie = process.env.NODE_ENV === 'production' || cookieSameSite === 'None'
 const allowedOrigins = (process.env.CLIENT_ORIGIN ?? '').split(',').map((origin) => origin.trim()).filter(Boolean)
 const scrypt = promisify(scryptCallback)
-const demoBankDetails = {
-  bankName: 'DEMO BANK (SAMPLE)',
-  accountName: 'LEGACY OF HORUS DEMO ACCOUNT',
-  accountNumber: '0000000000',
-  branch: 'DEMO BRANCH',
-  transferNote: 'These are dummy details for testing only. Do not transfer money.',
-}
-const sampleDonations = [
-  { id: 'HOR-2401', name: 'Sample Supporter', nic: '•••••••482V', reference: 'WALK-DEMO-001', amount: 50000, phone: '077 000 0001', email: 'supporter@example.com', receiptName: 'Sample receipt', receiptData: '', status: 'approved', showPublicly: true, createdAt: new Date('2026-10-28T09:30:00.000Z'), isSample: true },
-  { id: 'HOR-2402', name: 'Sample Supporter', nic: '•••••••731V', reference: 'WALK-DEMO-002', amount: 25000, phone: '077 000 0002', email: 'friend@example.com', receiptName: 'Sample receipt', receiptData: '', status: 'approved', showPublicly: true, createdAt: new Date('2026-10-29T11:15:00.000Z'), isSample: true },
-  { id: 'HOR-2403', name: 'Sample Supporter', nic: '•••••••105V', reference: 'WALK-DEMO-003', amount: 10000, phone: '077 000 0003', email: 'donor@example.com', receiptName: 'Sample receipt', receiptData: '', status: 'pending', showPublicly: true, createdAt: new Date('2026-10-30T14:10:00.000Z'), isSample: true },
-]
-
 if (!process.env.MONGODB_URI) throw new Error('MONGODB_URI is required. Add it to .env.local.')
 if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
   throw new Error('SESSION_SECRET must contain at least 32 characters. Add it to .env.local.')
@@ -50,18 +37,23 @@ await Promise.all([
   donations.createIndexes([
     { key: { createdAt: -1 }, name: 'createdAt_desc' },
     { key: { status: 1, showPublicly: 1 }, name: 'status_public' },
+    { key: { referenceKey: 1 }, name: 'reference_unique', unique: true, sparse: true },
   ]),
   admins.createIndex({ email: 1 }, { unique: true }),
 ])
 await settings.updateOne(
   { _id: 'campaign' },
-  { $setOnInsert: { bankDetails: demoBankDetails, showCampaignSection: true, updatedAt: new Date() } },
+  { $setOnInsert: { bankAccounts: [], showCampaignSection: true, updatedAt: new Date() } },
   { upsert: true },
 )
-
-if (await donations.estimatedDocumentCount() === 0) {
-  await donations.insertMany(sampleDonations)
+const campaignSettings = await settings.findOne({ _id: 'campaign' })
+if (!Array.isArray(campaignSettings?.bankAccounts)) {
+  const legacyBank = campaignSettings?.bankDetails
+  const containsPlaceholderText = legacyBank && Object.values(legacyBank).some((value) => /demo|dummy|sample/i.test(String(value)))
+  const bankAccounts = validBankDetails(legacyBank) && !containsPlaceholderText ? [sanitizeBankDetails(legacyBank)] : []
+  await settings.updateOne({ _id: 'campaign' }, { $set: { bankAccounts, updatedAt: new Date() }, $unset: { bankDetails: '' } })
 }
+await donations.deleteMany({ isSample: true })
 
 const adminCount = await admins.countDocuments()
 if (adminCount === 0) {
@@ -175,7 +167,19 @@ async function verifyPassword(password, storedHash) {
 }
 
 function validBankDetails(value) {
-  return value && ['bankName', 'accountName', 'accountNumber', 'branch', 'transferNote'].every((key) => typeof value[key] === 'string' && value[key].trim().length > 0)
+  return value && ['bankName', 'accountName', 'accountNumber', 'branch'].every((key) => typeof value[key] === 'string' && value[key].trim().length > 0) && (value.transferNote === undefined || typeof value.transferNote === 'string')
+}
+
+function sanitizeBankDetails(value) {
+  return Object.fromEntries(['bankName', 'accountName', 'accountNumber', 'branch', 'transferNote'].map((key) => [key, typeof value[key] === 'string' ? value[key].trim().slice(0, 300) : '']))
+}
+
+function normalizeReference(value) {
+  return value.toUpperCase().replace(/\s+/g, '')
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 app.get('/api/health', async (_request, response) => {
@@ -187,15 +191,15 @@ app.get('/api/public/bootstrap', async (_request, response) => {
   const [campaign, approvedTotal, supporters, approvedCount] = await Promise.all([
     settings.findOne({ _id: 'campaign' }),
     donations.aggregate([{ $match: { status: 'approved' } }, { $group: { _id: null, amount: { $sum: '$amount' } } }]).next(),
-    donations.find({ status: 'approved', showPublicly: true }, { projection: { name: 1, amount: 1, createdAt: 1, donorPhotoData: 1, isSample: 1 } }).sort({ createdAt: -1 }).toArray(),
+    donations.find({ status: 'approved', showPublicly: true }, { projection: { name: 1, amount: 1, createdAt: 1, donorPhotoData: 1 } }).sort({ createdAt: -1 }).toArray(),
     donations.countDocuments({ status: 'approved' }),
   ])
   response.json({
-    bankDetails: campaign.bankDetails,
+    bankAccounts: Array.isArray(campaign.bankAccounts) ? campaign.bankAccounts : [],
     showCampaignSection: campaign.showCampaignSection,
     raised: approvedTotal?.amount ?? 0,
     approvedCount,
-    supporters: supporters.map(({ _id, name, amount, createdAt, donorPhotoData, isSample }) => ({ id: String(_id), name, amount, createdAt, donorPhotoData: donorPhotoData ?? '', isSample: Boolean(isSample) })),
+    supporters: supporters.map(({ _id, name, amount, createdAt, donorPhotoData }) => ({ id: String(_id), name, amount, createdAt, donorPhotoData: donorPhotoData ?? '' })),
   })
 })
 
@@ -203,7 +207,7 @@ app.post('/api/public/donations', async (request, response) => {
   const { name, nic, reference, amount, phone, email = '', receiptName, receiptData, donorPhotoName = '', donorPhotoData = '', showPublicly = false } = request.body ?? {}
   const cleanName = typeof name === 'string' ? name.trim() : ''
   const cleanNic = typeof nic === 'string' ? nic.trim() : ''
-  const cleanReference = typeof reference === 'string' ? reference.trim() : ''
+  const cleanReference = typeof reference === 'string' ? reference.trim().slice(0, 120) : ''
   const cleanPhone = typeof phone === 'string' ? phone.trim() : ''
   const numericAmount = Number(amount)
   const validNic = /^(?:\d{9}[vVxX]|\d{12})$/.test(cleanNic)
@@ -214,12 +218,16 @@ app.post('/api/public/donations', async (request, response) => {
   }
   if (Buffer.byteLength(receiptData, 'utf8') > maxImageUploadBytes) return response.status(413).json({ error: 'Receipt image exceeds the 10 MB upload limit.' })
   if (Buffer.byteLength(donorPhotoData, 'utf8') > maxImageUploadBytes) return response.status(413).json({ error: 'Supporter photo exceeds the 10 MB upload limit.' })
+  const referenceKey = normalizeReference(cleanReference)
+  const existingReference = await donations.findOne({ $or: [{ referenceKey }, { reference: { $regex: `^${escapeRegExp(cleanReference)}$`, $options: 'i' } }] }, { projection: { _id: 1 } })
+  if (existingReference) return response.status(409).json({ error: 'This payment reference has already been submitted.' })
 
   const donation = {
     id: `HOR-${randomBytes(3).toString('hex').toUpperCase()}`,
     name: cleanName.slice(0, 100),
     nic: cleanNic,
-    reference: cleanReference.slice(0, 120),
+    reference: cleanReference,
+    referenceKey,
     amount: numericAmount,
     phone: cleanPhone.slice(0, 32),
     email: typeof email === 'string' ? email.trim().slice(0, 160) : '',
@@ -231,7 +239,12 @@ app.post('/api/public/donations', async (request, response) => {
     showPublicly: showPublicly === true,
     createdAt: new Date(),
   }
-  await donations.insertOne(donation)
+  try {
+    await donations.insertOne(donation)
+  } catch (error) {
+    if (error?.code === 11000) return response.status(409).json({ error: 'This payment reference has already been submitted.' })
+    throw error
+  }
   response.status(201).json({
     donation: {
       id: donation.id,
@@ -325,10 +338,11 @@ app.delete('/api/admin/users/:id', requireUser, requireAdmin, async (request, re
 })
 
 app.put('/api/admin/settings/bank', requireUser, requireAdmin, async (request, response) => {
-  if (!validBankDetails(request.body)) return response.status(400).json({ error: 'All bank detail fields are required.' })
-  const bankDetails = Object.fromEntries(['bankName', 'accountName', 'accountNumber', 'branch', 'transferNote'].map((key) => [key, request.body[key].trim().slice(0, 300)]))
-  await settings.updateOne({ _id: 'campaign' }, { $set: { bankDetails, updatedAt: new Date() } }, { upsert: true })
-  response.json({ bankDetails })
+  const accounts = request.body?.bankAccounts
+  if (!Array.isArray(accounts) || accounts.length > 10 || !accounts.every(validBankDetails)) return response.status(400).json({ error: 'Provide up to 10 complete bank accounts.' })
+  const bankAccounts = accounts.map(sanitizeBankDetails)
+  await settings.updateOne({ _id: 'campaign' }, { $set: { bankAccounts, updatedAt: new Date() }, $unset: { bankDetails: '' } }, { upsert: true })
+  response.json({ bankAccounts })
 })
 
 app.put('/api/admin/settings/campaign-visibility', requireUser, requireAdmin, async (request, response) => {

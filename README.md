@@ -100,11 +100,11 @@ Do not commit `.env.local`, `node_modules`, or `dist`. MongoDB record changes do
 - Contributors may optionally add a supporter photo. Only approved donations with donor consent appear in the public supporters list, including the photo when provided. NIC, bank reference, contact information, and receipt data are never returned by the public API.
 - Passwords are hashed with Node's `scrypt`. Authentication uses a signed, `HttpOnly` session cookie.
 - The first server start creates the initial admin from `.env.local` if no admin exists. Later environment changes do not overwrite existing accounts.
-- The first empty database is seeded with clearly marked sample donations and dummy bank details. Replace or remove those records before launch.
+- Bank accounts are managed from the admin panel and published to the contribution page.
 
 This site records bank-transfer evidence; it does not process payments.
 
-## Replace demo content
+## Content checklist
 
 - Verify the bank details through the admin Bank details tab before accepting transfers.
 - Confirm organizer names and phone/WhatsApp contacts in `client/src/App.tsx`.

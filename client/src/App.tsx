@@ -5,7 +5,6 @@ import {
   ArrowUpRight,
   BadgeCheck,
   Check,
-  Clock3,
   Eye,
   FileImage,
   Heart,
@@ -47,7 +46,6 @@ interface Donation {
   status: DonationStatus
   createdAt: string
   showPublicly?: boolean
-  isSample?: boolean
 }
 
 interface AdminUser {
@@ -65,13 +63,12 @@ interface PublicSupporter {
   amount: number
   createdAt: string
   donorPhotoData?: string
-  isSample?: boolean
 }
 
 type SubmittedDonation = Pick<Donation, 'id' | 'name' | 'amount' | 'status' | 'createdAt' | 'showPublicly'>
 
 interface PublicBootstrap {
-  bankDetails: BankDetails
+  bankAccounts: BankDetails[]
   showCampaignSection: boolean
   raised: number
   approvedCount: number
@@ -90,14 +87,6 @@ const FUNDRAISING_GOAL = 1_000_000
 const MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
 const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 const WALK_DATE = new Date('2027-01-23T00:00:00+05:30')
-const initialBankDetails: BankDetails = {
-  bankName: 'DEMO BANK (SAMPLE)',
-  accountName: 'LEGACY OF HORUS DEMO ACCOUNT',
-  accountNumber: '0000000000',
-  branch: 'DEMO BRANCH',
-  transferNote: 'These are dummy details for testing only. Do not transfer money.',
-}
-
 const organizers = [
   { name: 'IMASHA DESHAN', role: 'Walk contact', phone: '0777447517', photo: '/organizer-01.jpg' },
   { name: 'Nimash Kithmal', role: 'Walk contact', phone: '0760579023', photo: '/organizer-02.jpg' },
@@ -210,7 +199,7 @@ function App() {
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([])
   const [currentUserEmail, setCurrentUserEmail] = useState('')
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null)
-  const [publicData, setPublicData] = useState<PublicBootstrap>({ bankDetails: initialBankDetails, showCampaignSection: true, raised: 0, approvedCount: 0, supporters: [] })
+  const [publicData, setPublicData] = useState<PublicBootstrap>({ bankAccounts: [], showCampaignSection: true, raised: 0, approvedCount: 0, supporters: [] })
   const [apiError, setApiError] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [donorPhoto, setDonorPhoto] = useState<{ name: string; size: number; dataUrl: string } | null>(null)
@@ -220,8 +209,9 @@ function App() {
   const [userSuccess, setUserSuccess] = useState('')
   const [adminTab, setAdminTab] = useState<AdminTab>('contributions')
   const [showCampaignSection, setShowCampaignSection] = useState(true)
-  const [bankDetails, setBankDetails] = useState<BankDetails>(initialBankDetails)
+  const [bankAccounts, setBankAccounts] = useState<BankDetails[]>([])
   const [bankSaveMessage, setBankSaveMessage] = useState('')
+  const [isSavingBankAccounts, setIsSavingBankAccounts] = useState(false)
   const [success, setSuccess] = useState<SubmittedDonation | null>(null)
   const [posterUnavailable, setPosterUnavailable] = useState(false)
   const [search, setSearch] = useState('')
@@ -232,11 +222,12 @@ function App() {
   const [updatingDonationIds, setUpdatingDonationIds] = useState<Set<string>>(() => new Set())
   const donationSubmissionLock = useRef(false)
   const donationStatusLocks = useRef(new Set<string>())
+  const bankSaveLock = useRef(false)
 
   async function refreshPublicData() {
     const data = await apiRequest<PublicBootstrap>('/public/bootstrap')
     setPublicData(data)
-    setBankDetails(data.bankDetails)
+    setBankAccounts(data.bankAccounts)
     setShowCampaignSection(data.showCampaignSection)
   }
 
@@ -254,7 +245,7 @@ function App() {
         const data = await apiRequest<PublicBootstrap>('/public/bootstrap')
         if (!active) return
         setPublicData(data)
-        setBankDetails(data.bankDetails)
+        setBankAccounts(data.bankAccounts)
         setShowCampaignSection(data.showCampaignSection)
         setApiError('')
       } catch (error) {
@@ -344,9 +335,26 @@ function App() {
     navigate('login')
   }
 
-  async function handleSaveBankDetails(event: FormEvent<HTMLFormElement>) {
+  async function saveBankAccounts(nextAccounts: BankDetails[], message: string) {
+    if (bankSaveLock.current) return false
+    bankSaveLock.current = true
+    setIsSavingBankAccounts(true)
+    try {
+      const result = await apiRequest<{ bankAccounts: BankDetails[] }>('/admin/settings/bank', { method: 'PUT', body: JSON.stringify({ bankAccounts: nextAccounts }) })
+      setBankAccounts(result.bankAccounts)
+      setPublicData((current) => ({ ...current, bankAccounts: result.bankAccounts }))
+      setBankSaveMessage(message)
+      return true
+    } finally {
+      bankSaveLock.current = false
+      setIsSavingBankAccounts(false)
+    }
+  }
+
+  async function handleAddBankAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const formData = new FormData(event.currentTarget)
+    const formElement = event.currentTarget
+    const formData = new FormData(formElement)
     const values: BankDetails = {
       bankName: String(formData.get('bankName') ?? '').trim(),
       accountName: String(formData.get('accountName') ?? '').trim(),
@@ -354,12 +362,24 @@ function App() {
       branch: String(formData.get('branch') ?? '').trim(),
       transferNote: String(formData.get('transferNote') ?? '').trim(),
     }
+    if (bankAccounts.length >= 10) {
+      setBankSaveMessage('You can save up to 10 bank accounts.')
+      return
+    }
     try {
-      const result = await apiRequest<{ bankDetails: BankDetails }>('/admin/settings/bank', { method: 'PUT', body: JSON.stringify(values) })
-      setBankDetails(result.bankDetails)
-      setBankSaveMessage('Bank details saved to MongoDB and updated on the public donation page.')
+      if (await saveBankAccounts([...bankAccounts, values], 'Bank account added and published on the donation page.')) formElement.reset()
     } catch (error) {
-      setBankSaveMessage(error instanceof Error ? error.message : 'Could not save bank details.')
+      setBankSaveMessage(error instanceof Error ? error.message : 'Could not add the bank account.')
+    }
+  }
+
+  async function removeBankAccount(index: number) {
+    const account = bankAccounts[index]
+    if (!account || !window.confirm(`Remove the ${account.bankName} account ending ${account.accountNumber.slice(-4)}?`)) return
+    try {
+      await saveBankAccounts(bankAccounts.filter((_, accountIndex) => accountIndex !== index), 'Bank account removed from the donation page.')
+    } catch (error) {
+      setBankSaveMessage(error instanceof Error ? error.message : 'Could not remove the bank account.')
     }
   }
 
@@ -681,20 +701,21 @@ function App() {
               <p className="eyebrow"><span className="eyebrow-rule" /> YOUR STEP MATTERS</p>
               <h2>Give what<br /><em>you can.</em></h2>
               <p className="body-copy">Make a bank transfer, then send us your details and receipt. Our team will verify it and update the campaign total.</p>
-              <div className="payment-note">
-                <Landmark size={17} />
-                <div className="public-bank-details">
-                  <div className="public-bank-title"><strong>Bank transfer details</strong><span>DEMO DATA</span></div>
-                  <dl>
-                    <div><dt>Bank</dt><dd>{bankDetails.bankName}</dd></div>
-                    <div><dt>Account name</dt><dd>{bankDetails.accountName}</dd></div>
-                    <div><dt>Account number</dt><dd>{bankDetails.accountNumber}</dd></div>
-                    <div><dt>Branch</dt><dd>{bankDetails.branch}</dd></div>
-                  </dl>
-                  <p>{bankDetails.transferNote}</p>
-                </div>
-              </div>
-              <p className="demo-note"><Clock3 size={14} /> Demo website: payments are not processed here.</p>
+              {bankAccounts.length > 0 ? <div className="public-bank-list">
+                {bankAccounts.map((account, index) => <div className="payment-note" key={`${account.bankName}-${account.accountNumber}-${index}`}>
+                  <Landmark size={17} />
+                  <div className="public-bank-details">
+                    <div className="public-bank-title"><strong>Bank transfer details {bankAccounts.length > 1 ? `${index + 1}` : ''}</strong></div>
+                    <dl>
+                      <div><dt>Bank</dt><dd>{account.bankName}</dd></div>
+                      <div><dt>Account name</dt><dd>{account.accountName}</dd></div>
+                      <div><dt>Account number</dt><dd>{account.accountNumber}</dd></div>
+                      <div><dt>Branch</dt><dd>{account.branch}</dd></div>
+                    </dl>
+                    {account.transferNote ? <p>{account.transferNote}</p> : null}
+                  </div>
+                </div>)}
+              </div> : <p className="bank-details-empty"><Landmark size={14} /> Bank transfer details will be available soon.</p>}
             </div>
             <form className="donation-form" onSubmit={handleDonationSubmit}>
               <div className="form-heading"><div><span className="form-kicker">CONTRIBUTION FORM</span><h3>Send your contribution</h3></div><Heart size={20} /></div>
@@ -704,7 +725,7 @@ function App() {
                   <div><strong>Details received</strong><p>Thank you, {success.name}. Your reference is <b>{success.id}</b>. Your receipt is waiting for review. {success.showPublicly ? 'Your name and amount will appear in the public supporters list after approval.' : 'Your name and amount will stay off the public supporters list.'}</p></div>
                   <button type="button" className="icon-button" onClick={() => setSuccess(null)} aria-label="Close confirmation"><X size={17} /></button>
                 </div>
-              ) : null}
+              ) : <>
               <div className="form-grid">
                 <label className="field field-wide">Full name<input name="name" type="text" placeholder="Name on your bank transfer" autoComplete="name" required /></label>
                 <div className="donor-photo-field field-wide">
@@ -717,8 +738,8 @@ function App() {
                   </label>
                   <p className="donor-photo-note">Your photo appears only after approval and only when you choose to join the public supporters list.</p>
                 </div>
-                <label className="field">NIC number<input name="nic" type="text" placeholder="e.g. 200012345678" autoComplete="off" required /></label>
-                <label className="field">Payment reference<input name="reference" type="text" placeholder="Bank transfer reference" required /></label>
+                <label className="field">NIC number<input name="nic" type="text" inputMode="text" minLength={10} maxLength={12} pattern="(?:[0-9]{9}[VvXx]|[0-9]{12})" title="Enter 12 digits (for example 200320911634) or the older 9 digits followed by V/X" placeholder="e.g. 200320911634" autoComplete="off" required /></label>
+                <label className="field">Payment reference<input name="reference" type="text" maxLength={120} placeholder="Bank transfer reference" required /></label>
                 <label className="field">Amount (LKR)<input name="amount" type="number" min="100" step="1" placeholder="5000" required /></label>
                 <label className="field">Phone number<input name="phone" type="tel" placeholder="07X XXX XXXX" autoComplete="tel" required /></label>
                 <label className="field field-wide">Email address <span className="optional">OPTIONAL</span><input name="email" type="email" placeholder="you@example.com" autoComplete="email" /></label>
@@ -738,6 +759,7 @@ function App() {
                 {submissionState === 'optimizing' ? <><LoaderCircle className="loading-spinner" size={17} /> Optimizing image…</> : submissionState === 'submitting' ? <><LoaderCircle className="loading-spinner" size={17} /> Submitting…</> : isPhotoProcessing ? <><LoaderCircle className="loading-spinner" size={17} /> Processing photo…</> : <>Submit for verification <ArrowUpRight size={17} /></>}
               </button>
               <p className="privacy-note"><ShieldCheck size={14} /> Your details are only used to verify this contribution.</p>
+              </>}
             </form>
           </section>
 
@@ -749,7 +771,7 @@ function App() {
                   <li className="supporter-row" key={donation.id}>
                     <span className="supporter-index">{String(index + 1).padStart(2, '0')}</span>
                     <span className="supporter-avatar">{donation.donorPhotoData ? <img src={donation.donorPhotoData} alt={`${donation.name} supporter portrait`} /> : <span>{donation.name.trim().charAt(0).toUpperCase()}</span>}</span>
-                    <span className="supporter-name">{donation.name}{donation.isSample ? <small>DEMO</small> : null}</span>
+                    <span className="supporter-name">{donation.name}</span>
                     <span className="supporter-date">{formatDate(donation.createdAt)}</span>
                     <strong className="supporter-amount">{currency.format(donation.amount)}</strong>
                   </li>
@@ -828,7 +850,7 @@ function App() {
         </main>
       ) : (
         <main className="admin-page">
-          <div className="admin-topline"><p className="eyebrow"><span className="eyebrow-rule" /> LEGACY OF HORUS · ADMIN</p><span className="demo-admin"><span /> SECURE ADMIN PANEL</span></div>
+          <div className="admin-topline"><p className="eyebrow"><span className="eyebrow-rule" /> LEGACY OF HORUS · ADMIN</p><span className="admin-security-status"><span /> SECURE ADMIN PANEL</span></div>
           <div className="admin-title-row"><div><h1>{adminTab === 'users' ? <>User<br /><em>management.</em></> : adminTab === 'visibility' ? <>Campaign<br /><em>visibility.</em></> : adminTab === 'bank' ? <>Bank<br /><em>details.</em></> : <>Contribution<br /><em>ledger.</em></>}</h1><p>{adminTab === 'users' ? 'Manage team accounts and their access to the campaign.' : adminTab === 'visibility' ? 'Choose whether the campaign progress section appears on the public homepage.' : adminTab === 'bank' ? 'Set the transfer details shown to people making a contribution.' : 'Review submitted receipts and keep the walk total up to date.'}</p></div><div className="admin-mark"><UserRound size={23} /><span>{currentUser?.name}<br />{currentUser?.role.toUpperCase()} ACCOUNT</span></div></div>
           <div className="admin-stats">
             <article><span>CONFIRMED TOTAL</span><strong>{currency.format(raised)}</strong><small>Approved contributions only</small></article>
@@ -846,11 +868,11 @@ function App() {
             <div className="table-wrap"><table><thead><tr><th>DONOR</th><th>REFERENCE / NIC</th><th>AMOUNT</th><th>PUBLIC LIST</th><th>RECEIPT</th><th>DATE</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>
               {visibleDonations.map((donation) => (
                 <tr key={donation.id}>
-                  <td><div className="admin-donor"><span className="admin-donor-avatar">{donation.donorPhotoData ? <img src={donation.donorPhotoData} alt="" /> : <UserRound size={15} />}</span><span><strong>{donation.name}</strong><small>{donation.phone}</small>{donation.isSample ? <span className="sample-tag table-sample">SAMPLE</span> : null}</span></div></td>
+                  <td><div className="admin-donor"><span className="admin-donor-avatar">{donation.donorPhotoData ? <img src={donation.donorPhotoData} alt="" /> : <UserRound size={15} />}</span><span><strong>{donation.name}</strong><small>{donation.phone}</small></span></div></td>
                   <td><strong>{donation.reference}</strong><small>{donation.nic}</small></td>
                   <td className="amount-cell">{currency.format(donation.amount)}</td>
                   <td><span className={`public-consent-status ${donation.showPublicly ? 'consent-public' : 'consent-private'}`}>{donation.showPublicly ? 'Public' : 'Private'}</span></td>
-                  <td>{donation.receiptData ? <button className="receipt-link" onClick={() => setReceipt(donation)}><FileImage size={15} /> View</button> : <span className="muted">Sample</span>}</td>
+                  <td>{donation.receiptData ? <button className="receipt-link" onClick={() => setReceipt(donation)}><FileImage size={15} /> View</button> : <span className="muted">Unavailable</span>}</td>
                   <td>{formatDate(donation.createdAt)}</td>
                   <td><span className={`status-pill status-${donation.status}`}><span />{donation.status}</span></td>
                   <td><div className="row-actions">{updatingDonationIds.has(donation.id) ? <span className="row-action-loading" role="status" aria-label={`Updating ${donation.name}`}><LoaderCircle className="loading-spinner" size={16} /></span> : donation.status === 'pending' && currentUser?.role === 'Admin' ? <><button className="approve-action" onClick={() => { void updateStatus(donation.id, 'approved').catch((error: unknown) => setApiError(error instanceof Error ? error.message : 'Could not approve contribution.')) }} aria-label={`Approve ${donation.name}`} title="Approve"><Check size={15} /></button><button className="reject-action" onClick={() => { void updateStatus(donation.id, 'rejected').catch((error: unknown) => setApiError(error instanceof Error ? error.message : 'Could not reject contribution.')) }} aria-label={`Reject ${donation.name}`} title="Reject"><X size={15} /></button></> : donation.status === 'rejected' && currentUser?.role === 'Admin' ? <button className="delete-donation-action" onClick={() => { void deleteRejectedDonation(donation) }} aria-label={`Delete rejected contribution from ${donation.name}`} title="Delete rejected contribution"><Trash2 size={15} /></button> : <span className="muted">{donation.status === 'pending' ? 'Review only' : donation.status === 'approved' ? 'Counted' : 'Closed'}</span>}</div></td>
@@ -858,7 +880,7 @@ function App() {
               ))}
               {visibleDonations.length === 0 ? <tr><td className="empty-row" colSpan={8}>No contributions match this search.</td></tr> : null}
             </tbody></table></div>
-            <p className="ledger-footnote"><BadgeCheck size={15} /> The total includes approved entries only. Demo data is marked and should be cleared before launch.</p>
+            <p className="ledger-footnote"><BadgeCheck size={15} /> The total includes approved contributions only.</p>
           </section> : adminTab === 'users' ? (
             <section className="user-management-section">
               <div className="user-management-heading"><div><span className="form-kicker">TEAM ACCESS</span><h2>Manage user accounts</h2><p>Create admin accounts or reviewer accounts for receipt review.</p></div><span className="user-count"><Users size={16} /> {adminUsers.length} ACCOUNTS</span></div>
@@ -904,20 +926,25 @@ function App() {
             </section>
           ) : (
             <section className="bank-settings-section">
-              <div className="bank-settings-heading"><div><span className="form-kicker">PUBLIC DONATION PAGE</span><h2>Bank transfer details</h2><p>Saved values appear in the contribution section immediately.</p></div><span className="demo-bank-badge"><span /> DUMMY VALUES</span></div>
-              <form className="bank-details-form" onSubmit={handleSaveBankDetails}>
-                <label className="field">Bank name<input name="bankName" type="text" defaultValue={bankDetails.bankName} required /></label>
-                <label className="field">Account holder name<input name="accountName" type="text" defaultValue={bankDetails.accountName} required /></label>
-                <label className="field">Account number<input name="accountNumber" type="text" inputMode="numeric" defaultValue={bankDetails.accountNumber} required /></label>
-                <label className="field">Branch<input name="branch" type="text" defaultValue={bankDetails.branch} required /></label>
-                <label className="field bank-note-field">Transfer note<textarea name="transferNote" defaultValue={bankDetails.transferNote} rows={3} required /></label>
-                <p className="bank-demo-warning"><ShieldCheck size={15} /> Dummy data only. Replace with verified account information before accepting real transfers.</p>
+              <div className="bank-settings-heading"><div><span className="form-kicker">PUBLIC DONATION PAGE</span><h2>Bank transfer accounts</h2><p>Add up to 10 accounts. Saved accounts appear on the contribution page immediately.</p></div><span className="bank-account-count">{bankAccounts.length} / 10 ACCOUNTS</span></div>
+              {bankAccounts.length > 0 ? <div className="saved-bank-accounts">
+                {bankAccounts.map((account, index) => <article className="saved-bank-account" key={`${account.bankName}-${account.accountNumber}-${index}`}>
+                  <div><strong>{account.bankName}</strong><span>{account.accountName}</span><small>{account.accountNumber} · {account.branch}</small>{account.transferNote ? <p>{account.transferNote}</p> : null}</div>
+                  <button type="button" disabled={isSavingBankAccounts} onClick={() => { void removeBankAccount(index) }} aria-label={`Remove ${account.bankName} account`} title="Remove account"><Trash2 size={15} /></button>
+                </article>)}
+              </div> : <p className="no-bank-accounts">No bank accounts have been added yet.</p>}
+              <form className="bank-details-form" onSubmit={handleAddBankAccount}>
+                <label className="field">Bank name<input name="bankName" type="text" required /></label>
+                <label className="field">Account holder name<input name="accountName" type="text" required /></label>
+                <label className="field">Account number<input name="accountNumber" type="text" inputMode="numeric" required /></label>
+                <label className="field">Branch<input name="branch" type="text" required /></label>
+                <label className="field bank-note-field">Transfer note <span className="optional">OPTIONAL</span><textarea name="transferNote" rows={3} /></label>
                 {bankSaveMessage ? <p className="user-success bank-save-message" role="status">{bankSaveMessage}</p> : null}
-                <button className="button button-gold save-bank-button" type="submit"><Check size={16} /> Save bank details</button>
+                <button className="button button-gold save-bank-button" type="submit" disabled={bankAccounts.length >= 10 || isSavingBankAccounts}>{isSavingBankAccounts ? <><LoaderCircle className="loading-spinner" size={16} /> Saving…</> : <><Check size={16} /> Add bank account</>}</button>
               </form>
             </section>
           )}
-          <div className="admin-bottom"><span>MONGODB PERSISTENCE · NOT A LIVE PAYMENT SYSTEM</span><button onClick={() => navigate('home')}>Return to campaign <ArrowUpRight size={15} /></button></div>
+          <div className="admin-bottom"><span>SECURE CAMPAIGN MANAGEMENT</span><button onClick={() => navigate('home')}>Return to campaign <ArrowUpRight size={15} /></button></div>
         </main>
       )}
 
