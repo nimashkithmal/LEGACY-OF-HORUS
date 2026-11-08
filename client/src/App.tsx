@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   ArrowDownRight,
   ArrowLeft,
@@ -11,6 +11,7 @@ import {
   Heart,
   Info,
   Landmark,
+  LoaderCircle,
   LogOut,
   MessageCircle,
   Phone,
@@ -87,6 +88,7 @@ interface BankDetails {
 
 const FUNDRAISING_GOAL = 1_000_000
 const MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
+const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 const WALK_DATE = new Date('2027-01-23T00:00:00+05:30')
 const initialBankDetails: BankDetails = {
   bankName: 'DEMO BANK (SAMPLE)',
@@ -137,22 +139,30 @@ function optimizeImage(file: File, maxDimension: number, maxDataUrlBytes: number
     const image = new Image()
     image.onload = () => {
       try {
-        const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight))
+        if (!image.naturalWidth || !image.naturalHeight) throw new Error('This image has no readable dimensions.')
+        let scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight))
         const canvas = document.createElement('canvas')
-        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
-        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
-        const context = canvas.getContext('2d')
+        const context = canvas.getContext('2d', { alpha: false })
         if (!context) throw new Error('Image processing is not available in this browser.')
-        context.drawImage(image, 0, 0, canvas.width, canvas.height)
 
-        let quality = 0.9
-        let dataUrl = canvas.toDataURL('image/webp', quality)
-        while (dataUrl.length > maxDataUrlBytes && quality > 0.5) {
-          quality -= 0.1
-          dataUrl = canvas.toDataURL('image/webp', quality)
+        let dataUrl = ''
+        for (let resizeAttempt = 0; resizeAttempt < 8; resizeAttempt += 1) {
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+          context.fillStyle = '#ffffff'
+          context.fillRect(0, 0, canvas.width, canvas.height)
+          context.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+          for (const quality of [0.9, 0.8, 0.7, 0.6, 0.5, 0.42]) {
+            dataUrl = canvas.toDataURL('image/jpeg', quality)
+            if (dataUrl.length <= maxDataUrlBytes) {
+              resolve(dataUrl)
+              return
+            }
+          }
+          scale *= 0.78
         }
-        if (dataUrl.length > maxDataUrlBytes) throw new Error('The optimized image is still too large. Please choose a smaller image.')
-        resolve(dataUrl)
+        throw new Error('This image could not be reduced to the upload size. Please try another image.')
       } catch (error) {
         reject(error)
       } finally {
@@ -161,7 +171,7 @@ function optimizeImage(file: File, maxDimension: number, maxDataUrlBytes: number
     }
     image.onerror = () => {
       URL.revokeObjectURL(objectUrl)
-      reject(new Error('Could not read this image. Please choose a JPG, PNG, or WebP file.'))
+      reject(new Error('This image format cannot be read by your browser. Please try a screenshot of the image instead.'))
     }
     image.src = objectUrl
   })
@@ -217,6 +227,11 @@ function App() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [receipt, setReceipt] = useState<Donation | null>(null)
+  const [submissionState, setSubmissionState] = useState<'idle' | 'optimizing' | 'submitting'>('idle')
+  const [isPhotoProcessing, setIsPhotoProcessing] = useState(false)
+  const [updatingDonationIds, setUpdatingDonationIds] = useState<Set<string>>(() => new Set())
+  const donationSubmissionLock = useRef(false)
+  const donationStatusLocks = useRef(new Set<string>())
 
   async function refreshPublicData() {
     const data = await apiRequest<PublicBootstrap>('/public/bootstrap')
@@ -413,6 +428,7 @@ function App() {
 
   async function handleDonationSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (donationSubmissionLock.current) return
     const formElement = event.currentTarget
     setFormError('')
     const formData = new FormData(formElement)
@@ -431,7 +447,11 @@ function App() {
       return
     }
 
+    donationSubmissionLock.current = true
+    setSubmissionState('optimizing')
     try {
+      const receiptData = await optimizeImage(selectedFile, 2200, MAX_IMAGE_UPLOAD_BYTES)
+      setSubmissionState('submitting')
       const donationPayload = {
         name: String(formData.get('name') ?? '').trim(),
         nic,
@@ -440,7 +460,7 @@ function App() {
         phone: String(formData.get('phone') ?? '').trim(),
         email: String(formData.get('email') ?? '').trim(),
         receiptName: selectedFile.name,
-        receiptData: await optimizeImage(selectedFile, 2200, 4_000_000),
+        receiptData,
         donorPhotoName: donorPhoto?.name ?? '',
         donorPhotoData: donorPhoto?.dataUrl ?? '',
         status: 'pending',
@@ -454,13 +474,49 @@ function App() {
       formElement.reset()
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'Could not submit the contribution. Please try again.')
+    } finally {
+      donationSubmissionLock.current = false
+      setSubmissionState('idle')
     }
   }
 
   async function updateStatus(id: string, status: DonationStatus) {
-    await apiRequest(`/admin/donations/${encodeURIComponent(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) })
-    setDonations((current) => current.map((donation) => donation.id === id ? { ...donation, status } : donation))
-    await refreshPublicData()
+    if (donationStatusLocks.current.has(id)) return
+    donationStatusLocks.current.add(id)
+    setUpdatingDonationIds((current) => new Set(current).add(id))
+    try {
+      await apiRequest(`/admin/donations/${encodeURIComponent(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) })
+      setDonations((current) => current.map((donation) => donation.id === id ? { ...donation, status } : donation))
+      await refreshPublicData()
+    } finally {
+      donationStatusLocks.current.delete(id)
+      setUpdatingDonationIds((current) => {
+        const next = new Set(current)
+        next.delete(id)
+        return next
+      })
+    }
+  }
+
+  async function deleteRejectedDonation(donation: Donation) {
+    if (donation.status !== 'rejected' || donationStatusLocks.current.has(donation.id)) return
+    if (!window.confirm(`Permanently delete the rejected contribution from ${donation.name}?`)) return
+    donationStatusLocks.current.add(donation.id)
+    setUpdatingDonationIds((current) => new Set(current).add(donation.id))
+    try {
+      await apiRequest(`/admin/donations/${encodeURIComponent(donation.id)}`, { method: 'DELETE' })
+      setDonations((current) => current.filter((row) => row.id !== donation.id))
+      if (receipt?.id === donation.id) setReceipt(null)
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : 'Could not delete the rejected contribution.')
+    } finally {
+      donationStatusLocks.current.delete(donation.id)
+      setUpdatingDonationIds((current) => {
+        const next = new Set(current)
+        next.delete(donation.id)
+        return next
+      })
+    }
   }
 
   async function updateCampaignVisibility(show: boolean) {
@@ -471,8 +527,8 @@ function App() {
 
   function handleReceiptFile(file?: File) {
     if (!file) return
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-      setFormError('Please upload a receipt image in JPG, PNG, or WebP format.')
+    if (file.type && !file.type.startsWith('image/')) {
+      setFormError('Please upload an image file for the payment receipt.')
       return
     }
     if (file.size > MAX_IMAGE_INPUT_BYTES) {
@@ -485,19 +541,22 @@ function App() {
 
   async function handleDonorPhoto(file?: File) {
     if (!file) return
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-      setFormError('Please choose a supporter photo in JPG, PNG, or WebP format.')
+    if (file.type && !file.type.startsWith('image/')) {
+      setFormError('Please choose an image file for the supporter photo.')
       return
     }
     if (file.size > MAX_IMAGE_INPUT_BYTES) {
       setFormError('The supporter photo must be 10 MB or smaller.')
       return
     }
+    setIsPhotoProcessing(true)
     try {
-      setDonorPhoto({ name: file.name, size: file.size, dataUrl: await optimizeImage(file, 1200, 2_600_000) })
+      setDonorPhoto({ name: file.name, size: file.size, dataUrl: await optimizeImage(file, 1200, MAX_IMAGE_UPLOAD_BYTES) })
       setFormError('')
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'Could not read the supporter photo.')
+    } finally {
+      setIsPhotoProcessing(false)
     }
   }
 
@@ -651,9 +710,9 @@ function App() {
                 <div className="donor-photo-field field-wide">
                   <span className="upload-label">Supporter photo <span className="required-note">OPTIONAL · UP TO 10 MB</span></span>
                   <label className={`donor-photo-upload ${donorPhoto ? 'has-photo' : ''}`}>
-                    <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { void handleDonorPhoto(event.target.files?.[0]) }} />
-                    <span className="donor-photo-preview">{donorPhoto ? <img src={donorPhoto.dataUrl} alt="Selected supporter" /> : <UserRound size={22} />}</span>
-                    <span className="donor-photo-copy"><strong>{donorPhoto ? donorPhoto.name : 'Add a photo of yourself'}</strong><small>{donorPhoto ? `${(donorPhoto.size / 1024).toFixed(0)} KB · Ready to share` : 'A square portrait works best · JPG, PNG or WebP'}</small></span>
+                    <input type="file" accept="image/*" disabled={isPhotoProcessing || submissionState !== 'idle'} onChange={(event) => { void handleDonorPhoto(event.target.files?.[0]) }} />
+                    <span className="donor-photo-preview">{isPhotoProcessing ? <LoaderCircle className="loading-spinner" size={22} /> : donorPhoto ? <img src={donorPhoto.dataUrl} alt="Selected supporter" /> : <UserRound size={22} />}</span>
+                    <span className="donor-photo-copy"><strong>{isPhotoProcessing ? 'Processing photo…' : donorPhoto ? donorPhoto.name : 'Add a photo of yourself'}</strong><small>{isPhotoProcessing ? 'Please wait while the image is optimized' : donorPhoto ? `${(donorPhoto.size / 1024).toFixed(0)} KB · Ready to share` : 'A square portrait works best · All supported image formats'}</small></span>
                     {donorPhoto ? <button className="remove-file" type="button" aria-label="Remove supporter photo" onClick={(event) => { event.preventDefault(); setDonorPhoto(null); const input = event.currentTarget.parentElement?.querySelector('input[type=file]') as HTMLInputElement | null; if (input) input.value = '' }}><X size={15} /></button> : <span className="upload-action">CHOOSE PHOTO</span>}
                   </label>
                   <p className="donor-photo-note">Your photo appears only after approval and only when you choose to join the public supporters list.</p>
@@ -667,15 +726,17 @@ function App() {
                 <div className="field field-wide">
                   <span className="upload-label">Payment receipt <span className="required-note">REQUIRED · IMAGE UP TO 10 MB</span></span>
                   <label className={`upload-box ${selectedFile ? 'has-file' : ''}`}>
-                    <input type="file" accept="image/*" onChange={(event) => handleReceiptFile(event.target.files?.[0])} />
+                    <input type="file" accept="image/*" disabled={submissionState !== 'idle'} onChange={(event) => handleReceiptFile(event.target.files?.[0])} />
                     {selectedFile ? <FileImage size={20} /> : <Upload size={20} />}
-                    <span><strong>{selectedFile ? selectedFile.name : 'Choose receipt image'}</strong><small>{selectedFile ? `${(selectedFile.size / 1024).toFixed(0)} KB · Ready to optimize and submit` : 'JPG, PNG or WebP'}</small></span>
+                    <span><strong>{selectedFile ? selectedFile.name : 'Choose receipt image'}</strong><small>{selectedFile ? `${(selectedFile.size / 1024).toFixed(0)} KB · Ready to optimize and submit` : 'All image formats supported by your device'}</small></span>
                     {selectedFile ? <button className="remove-file" type="button" aria-label="Remove receipt" onClick={(event) => { event.preventDefault(); setSelectedFile(null) }}><X size={15} /></button> : <span className="upload-action">BROWSE</span>}
                   </label>
                 </div>
               </div>
               {formError ? <p className="form-error" role="alert">{formError}</p> : null}
-              <button className="button button-gold submit-button" type="submit">Submit for verification <ArrowUpRight size={17} /></button>
+              <button className="button button-gold submit-button" type="submit" disabled={submissionState !== 'idle' || isPhotoProcessing} aria-busy={submissionState !== 'idle'}>
+                {submissionState === 'optimizing' ? <><LoaderCircle className="loading-spinner" size={17} /> Optimizing image…</> : submissionState === 'submitting' ? <><LoaderCircle className="loading-spinner" size={17} /> Submitting…</> : isPhotoProcessing ? <><LoaderCircle className="loading-spinner" size={17} /> Processing photo…</> : <>Submit for verification <ArrowUpRight size={17} /></>}
+              </button>
               <p className="privacy-note"><ShieldCheck size={14} /> Your details are only used to verify this contribution.</p>
             </form>
           </section>
@@ -792,7 +853,7 @@ function App() {
                   <td>{donation.receiptData ? <button className="receipt-link" onClick={() => setReceipt(donation)}><FileImage size={15} /> View</button> : <span className="muted">Sample</span>}</td>
                   <td>{formatDate(donation.createdAt)}</td>
                   <td><span className={`status-pill status-${donation.status}`}><span />{donation.status}</span></td>
-                  <td><div className="row-actions">{donation.status === 'pending' && currentUser?.role === 'Admin' ? <><button className="approve-action" onClick={() => { void updateStatus(donation.id, 'approved').catch((error: unknown) => setApiError(error instanceof Error ? error.message : 'Could not approve contribution.')) }} aria-label={`Approve ${donation.name}`} title="Approve"><Check size={15} /></button><button className="reject-action" onClick={() => { void updateStatus(donation.id, 'rejected').catch((error: unknown) => setApiError(error instanceof Error ? error.message : 'Could not reject contribution.')) }} aria-label={`Reject ${donation.name}`} title="Reject"><X size={15} /></button></> : <span className="muted">{donation.status === 'pending' ? 'Review only' : donation.status === 'approved' ? 'Counted' : 'Closed'}</span>}</div></td>
+                  <td><div className="row-actions">{updatingDonationIds.has(donation.id) ? <span className="row-action-loading" role="status" aria-label={`Updating ${donation.name}`}><LoaderCircle className="loading-spinner" size={16} /></span> : donation.status === 'pending' && currentUser?.role === 'Admin' ? <><button className="approve-action" onClick={() => { void updateStatus(donation.id, 'approved').catch((error: unknown) => setApiError(error instanceof Error ? error.message : 'Could not approve contribution.')) }} aria-label={`Approve ${donation.name}`} title="Approve"><Check size={15} /></button><button className="reject-action" onClick={() => { void updateStatus(donation.id, 'rejected').catch((error: unknown) => setApiError(error instanceof Error ? error.message : 'Could not reject contribution.')) }} aria-label={`Reject ${donation.name}`} title="Reject"><X size={15} /></button></> : donation.status === 'rejected' && currentUser?.role === 'Admin' ? <button className="delete-donation-action" onClick={() => { void deleteRejectedDonation(donation) }} aria-label={`Delete rejected contribution from ${donation.name}`} title="Delete rejected contribution"><Trash2 size={15} /></button> : <span className="muted">{donation.status === 'pending' ? 'Review only' : donation.status === 'approved' ? 'Counted' : 'Closed'}</span>}</div></td>
                 </tr>
               ))}
               {visibleDonations.length === 0 ? <tr><td className="empty-row" colSpan={8}>No contributions match this search.</td></tr> : null}

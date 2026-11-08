@@ -275,8 +275,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .hero-actions { display: flex; align-items: center; gap: 24px; }
 .button { min-height: 47px; display: inline-flex; align-items: center; justify-content: center; gap: 22px; border: 0; text-decoration: none; font-size: 11px; font-weight: 700; cursor: pointer; transition: transform .18s ease, background .18s ease; }
 .button:hover { transform: translateY(-2px); }
+.button:disabled { cursor: wait; opacity: .72; transform: none; }
 .button-gold { padding: 0 18px; color: #130f08; background: linear-gradient(110deg, #c3933a, #f1ce7b 52%, #d2a246); box-shadow: 0 8px 26px rgba(191,142,49,.16); }
 .button-gold:hover { background: #f6d88e; }
+.button-gold:disabled:hover { background: linear-gradient(110deg, #c3933a, #f1ce7b 52%, #d2a246); }
+.loading-spinner { animation: loading-spin .8s linear infinite; }
+@keyframes loading-spin { to { transform: rotate(360deg); } }
 .text-link { display: inline-flex; gap: 8px; align-items: center; color: #ded4c2; text-decoration: none; font-size: 10px; transition: color .2s ease; }
 .text-link:hover { color: var(--gold-bright); }
 .hero-caption { position: absolute; right: 6.3%; bottom: 33px; display: flex; align-items: center; gap: 15px; color: #d4c9b0; font-size: 8px; letter-spacing: 1.5px; }
@@ -397,6 +401,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .donor-photo-upload { position: relative; display: flex; align-items: center; gap: 12px; min-height: 76px; padding: 10px 12px; overflow: hidden; border: 1px solid rgba(235,220,187,.16); background: radial-gradient(circle at 8% 50%, rgba(205,159,67,.1), transparent 28%), rgba(0,0,0,.12); cursor: pointer; transition: border-color .2s, background .2s; }
 .donor-photo-upload:hover, .donor-photo-upload.has-photo { border-color: rgba(225,192,119,.55); background-color: rgba(211,164,73,.045); }
 .donor-photo-upload > input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.donor-photo-upload > input:disabled, .upload-box input:disabled { cursor: wait; }
 .donor-photo-preview { position: relative; z-index: 0; display: grid; place-items: center; flex: 0 0 52px; height: 52px; overflow: hidden; border: 1px solid rgba(225,192,119,.58); border-radius: 50%; color: #caa85f; background: linear-gradient(145deg, #262116, #11100d); box-shadow: 0 0 0 3px rgba(211,164,73,.06); }
 .donor-photo-preview img { width: 100%; height: 100%; object-fit: cover; }
 .donor-photo-copy { position: relative; z-index: 0; display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 5px; }
@@ -565,10 +570,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .status-rejected { color: #da8c7d; }
 .row-actions { display: flex; align-items: center; gap: 5px; min-width: 57px; }
 .row-actions button { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid; background: transparent; cursor: pointer; }
+.row-action-loading { display: grid; place-items: center; width: 55px; height: 25px; color: #d8b96e; }
 .approve-action { color: #91c69d; border-color: rgba(145,198,157,.35) !important; }
 .approve-action:hover { color: #101b12; background: #91c69d; }
 .reject-action { color: #da8c7d; border-color: rgba(218,140,125,.35) !important; }
 .reject-action:hover { color: #21100d; background: #da8c7d; }
+.delete-donation-action { color: #da8c7d; border-color: rgba(218,140,125,.35) !important; }
+.delete-donation-action:hover { color: #fff; background: #9c4037; }
 .empty-row { padding: 28px 10px !important; color: #928a7b !important; text-align: center; }
 .ledger-footnote { display: flex; align-items: center; gap: 7px; margin: 16px 0 0; color: #928a7b; font-size: 8px; }
 .ledger-footnote svg { color: #bd9852; }

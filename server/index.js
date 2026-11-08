@@ -11,6 +11,7 @@ dotenv.config({ path: process.env.ENV_FILE ?? resolve(serverDirectory, '.env.loc
 
 const app = express()
 const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3001)
+const maxImageUploadBytes = 10 * 1024 * 1024
 const cookieName = 'horus_admin_session'
 const sessionDurationSeconds = 60 * 60 * 8
 const cookieSameSite = process.env.COOKIE_SAME_SITE?.toLowerCase() === 'none' ? 'None' : 'Lax'
@@ -82,7 +83,7 @@ if (adminCount === 0) {
 }
 
 app.disable('x-powered-by')
-app.use(express.json({ limit: '8mb' }))
+app.use(express.json({ limit: '25mb' }))
 app.use((request, response, next) => {
   const origin = request.headers.origin
   if (origin && allowedOrigins.includes(origin)) {
@@ -211,8 +212,8 @@ app.post('/api/public/donations', async (request, response) => {
   if (!cleanName || !validNic || !cleanReference || !cleanPhone || !Number.isSafeInteger(numericAmount) || numericAmount < 100 || !validReceipt || !validDonorPhoto) {
     return response.status(400).json({ error: 'Please check the required donation details and receipt image.' })
   }
-  if (Buffer.byteLength(receiptData, 'utf8') > 4_200_000) return response.status(413).json({ error: 'Receipt image exceeds the upload limit.' })
-  if (Buffer.byteLength(donorPhotoData, 'utf8') > 2_800_000) return response.status(413).json({ error: 'Supporter photo exceeds the upload limit.' })
+  if (Buffer.byteLength(receiptData, 'utf8') > maxImageUploadBytes) return response.status(413).json({ error: 'Receipt image exceeds the 10 MB upload limit.' })
+  if (Buffer.byteLength(donorPhotoData, 'utf8') > maxImageUploadBytes) return response.status(413).json({ error: 'Supporter photo exceeds the 10 MB upload limit.' })
 
   const donation = {
     id: `HOR-${randomBytes(3).toString('hex').toUpperCase()}`,
@@ -273,6 +274,12 @@ app.patch('/api/admin/donations/:id/status', requireUser, requireAdmin, async (r
   const result = await donations.updateOne({ id: request.params.id }, { $set: { status, reviewedAt: new Date(), reviewedBy: request.user.email } })
   if (!result.matchedCount) return response.status(404).json({ error: 'Contribution not found.' })
   response.json({ ok: true })
+})
+
+app.delete('/api/admin/donations/:id', requireUser, requireAdmin, async (request, response) => {
+  const result = await donations.deleteOne({ id: request.params.id, status: 'rejected' })
+  if (!result.deletedCount) return response.status(404).json({ error: 'Rejected contribution not found. Only rejected contributions can be deleted.' })
+  response.status(204).end()
 })
 
 app.get('/api/admin/users', requireUser, requireAdmin, async (_request, response) => {
